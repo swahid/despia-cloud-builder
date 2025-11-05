@@ -1,30 +1,49 @@
-# Use official Python image
+# Base image
 FROM python:3.11-slim
 
 WORKDIR /app
 
 ENV LOCAL=true
-
-# Install git, curl, npm and clean up apt cache
-RUN apt-get update && \
-    apt-get install -y git curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
-    apt-get install -y nodejs && \
-    npm install -g pnpm yarn
-
-# Install dependencies
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy app code
-COPY . .
-
-# Set environment variables
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV GIT_PYTHON_REFRESH=quiet
 
-# Start FastAPI with Uvicorn
-CMD exec uvicorn main:app --host $HOST --port $PORT --workers 1 --timeout-keep-alive 75
+# ---------------------------
+# Install system dependencies (without default nodejs)
+# ---------------------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git curl wget unzip zip build-essential python3-pip \
+        libpng-dev pkg-config libjpeg-dev libfreetype6-dev \
+        openjdk-21-jdk ca-certificates gnupg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------
+# Install Node.js 20 LTS + npm
+# ---------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g pnpm yarn
+
+# ---------------------------
+# Install React Native CLI globally
+# ---------------------------
+RUN npm install -g react-native-cli
+
+# ---------------------------
+# Python dependencies
+# ---------------------------
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---------------------------
+# Copy app code
+# ---------------------------
+COPY . .
+
+# Expose port
+EXPOSE 8080
+
+# Start FastAPI app
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--timeout-keep-alive", "75"]

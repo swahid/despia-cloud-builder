@@ -12,33 +12,24 @@ import aiohttp
 from git import Repo
 import subprocess
 
-# -----------------------------
-# Logging setup
-# -----------------------------
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("despia-builder")
 
-# -----------------------------
-# FastAPI app
-# -----------------------------
 app = FastAPI()
+LOCAL = os.environ.get("LOCAL", "true").lower() == "true"
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "despia-cloud-builder")
-LOCAL = os.environ.get("LOCAL", "true").lower() == "true"  # skip GCS if local
 
-# Initialize storage client only if not local
 if not LOCAL:
     from google.cloud import storage
     storage_client = storage.Client()
 else:
     storage_client = None
 
-# -----------------------------
-# Request / Response models
-# -----------------------------
+# Models
 class BuildRequest(BaseModel):
     source_url: str
     client_id: str
-    branch: Optional[str] = "main"
     callback_url: str
 
 class BuildResponse(BaseModel):
@@ -49,11 +40,8 @@ class BuildResponse(BaseModel):
     output_url: Optional[str] = None
     error: Optional[str] = None
 
-# -----------------------------
-# Helper functions
-# -----------------------------
+# Callback sender
 async def send_callback(callback_url: str, data: BuildResponse):
-    """Send callback notification"""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(callback_url, json=data.dict(exclude_none=True)) as resp:
@@ -61,13 +49,12 @@ async def send_callback(callback_url: str, data: BuildResponse):
     except Exception as e:
         logger.error(f"Failed to send callback: {str(e)}")
 
-async def clone_or_download(source_url: str, workspace: str, branch: str):
-    """Clone git or download zip async"""
+# Clone or download repo
+async def clone_or_download(source_url: str, workspace: str):
     loop = asyncio.get_event_loop()
     if source_url.endswith(".git"):
         await loop.run_in_executor(None, lambda: Repo.clone_from(source_url, workspace, depth=1))
     elif source_url.endswith(".zip"):
-        import aiohttp
         async with aiohttp.ClientSession() as session:
             async with session.get(source_url) as resp:
                 if resp.status != 200:
@@ -83,15 +70,14 @@ async def clone_or_download(source_url: str, workspace: str, branch: str):
     else:
         raise Exception("Unsupported source type")
 
-async def build_project_task(source_url: str, client_id: str, callback_url: str, branch: str):
-    """Main background build task"""
+# Background build task
+async def build_project_task(source_url: str, client_id: str, callback_url: str):
     workspace = tempfile.mkdtemp(prefix="build-")
     response = BuildResponse(message="Build started", client_id=client_id, status="processing")
     try:
         logger.info(f"Building project for client_id={client_id}")
-        await clone_or_download(source_url, workspace, branch)
+        await clone_or_download(source_url, workspace)
 
-        # Detect project directory
         entries = os.listdir(workspace)
         project_dir = os.path.join(workspace, entries[0]) if len(entries) == 1 and os.path.isdir(os.path.join(workspace, entries[0])) else workspace
 
@@ -119,11 +105,10 @@ async def build_project_task(source_url: str, client_id: str, callback_url: str,
             else:
                 build_cmd = f"{pm} install && {pm} run build"
                 out_dir = os.path.join(project_dir, "dist")
-            # Run build command
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: subprocess.run(build_cmd, shell=True, cwd=project_dir, check=True))
         else:
-            out_dir = project_dir  # no build
+            out_dir = project_dir
 
         # Zip output
         zip_name = f"despia_builder_{client_id}.zip"
@@ -135,7 +120,6 @@ async def build_project_task(source_url: str, client_id: str, callback_url: str,
                     arcname = os.path.relpath(file_path, out_dir)
                     zipf.write(file_path, arcname)
 
-        # Upload to GCS only if not local
         url = None
         if not LOCAL and storage_client:
             bucket = storage_client.bucket(GCS_BUCKET)
@@ -145,7 +129,6 @@ async def build_project_task(source_url: str, client_id: str, callback_url: str,
 
         response = BuildResponse(message="Build completed successfully", client_id=client_id, status="completed", artifact=zip_name, output_url=url)
         logger.info(f"Build completed for client_id={client_id}")
-
     except Exception as e:
         logger.error(f"Build failed: {str(e)}")
         response = BuildResponse(message="Build failed", client_id=client_id, status="failed", error=str(e))
@@ -153,9 +136,7 @@ async def build_project_task(source_url: str, client_id: str, callback_url: str,
         shutil.rmtree(workspace, ignore_errors=True)
         await send_callback(callback_url, response)
 
-# -----------------------------
-# API endpoints
-# -----------------------------
+# Endpoints
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
@@ -163,5 +144,5 @@ async def health():
 @app.post("/build", response_model=BuildResponse)
 async def build_endpoint(req: BuildRequest, background_tasks: BackgroundTasks):
     logger.info(f"Received build request for client_id={req.client_id}")
-    background_tasks.add_task(build_project_task, req.source_url, req.client_id, req.callback_url, req.branch)
+    background_tasks.add_task(build_project_task, req.source_url, req.client_id, req.callback_url)
     return BuildResponse(message="Build request accepted", client_id=req.client_id, status="accepted")
