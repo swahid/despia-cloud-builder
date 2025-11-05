@@ -1,0 +1,67 @@
+# Accept substitutions:
+# _SOURCE_URL - git URL (optional)
+# _BRANCH - branch name
+# _ZIP_GCS_PATH - optional GCS path for an uploaded zip (gs://bucket/path.zip)
+# _OUTPUT_BUCKET - destination bucket to upload bundle.zip or output/
+steps:
+- name: 'gcr.io/cloud-builders/git'
+  id: 'clone-or-skip'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      set -eux
+      rm -rf workspace
+      mkdir workspace
+      cd workspace
+      if [[ "${_ZIP_GCS_PATH}" != "" ]]; then
+        echo "Using uploaded zip from ${_ZIP_GCS_PATH}"
+        # download zip (Cloud Build has gsutil)
+        gsutil cp "${_ZIP_GCS_PATH}" source.zip
+        unzip -q source.zip -d repo
+        cd repo
+      else
+        echo "Cloning ${_SOURCE_URL} branch ${_BRANCH}"
+        git clone --depth=1 --branch="${_BRANCH}" "${_SOURCE_URL}" repo
+        cd repo
+      fi
+      # print package.json if exists
+      if [[ -f package.json ]]; then
+        cat package.json
+      fi
+      # copy workspace out to /workspace for next steps
+      pwd
+      cp -r . /workspace/repo
+
+# Detect package manager and framework
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'detect'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      set -eux
+      cd /workspace/repo || exit 1
+      /workspace/steps/detect.sh /workspace/repo > /workspace/detected.json
+      cat /workspace/detected.json
+
+# Install + build + package
+- name: 'gcr.io/cloud-builders/docker'
+  id: 'build-and-package'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      set -eux
+      cd /workspace/repo
+      /workspace/steps/build-and-package.sh /workspace/repo /workspace/detected.json
+      # upload output bundle to GCS
+      if [[ -f /workspace/repo/bundle.zip ]]; then
+        gsutil cp /workspace/repo/bundle.zip "${_OUTPUT_BUCKET}/bundle-$(date +%s).zip"
+      elif [[ -d /workspace/repo/dist ]]; then
+        zip -r /workspace/repo/bundle.zip ./dist
+        gsutil cp /workspace/repo/bundle.zip "${_OUTPUT_BUCKET}/bundle-$(date +%s).zip"
+      else
+        echo "No output found"
+        exit 1
+      fi
