@@ -1,12 +1,28 @@
-FROM node:20-slim
+# Use official Python image
+FROM python:3.11-slim
+
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --production
+
+# Install git, curl, npm and clean up apt cache
+RUN apt-get update && \
+    apt-get install -y git curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g pnpm yarn
+
+# Install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app code
 COPY . .
-# gcloud SDK is required for this simple starter to call gcloud builds.
-# For production, prefer calling Cloud Build REST API with OAuth tokens instead of embedding gcloud.
-RUN apt-get update && apt-get install -y curl gnupg && rm -rf /var/lib/apt/lists/*
-# install gcloud cli (minimal)
-RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
- && apt-get update && apt-get install -y google-cloud-sdk
-CMD ["node","index.js"]
+
+# Set environment variables
+ENV PORT=8080
+ENV HOST=0.0.0.0
+ENV GIT_PYTHON_REFRESH=quiet
+
+# Start FastAPI with Uvicorn
+CMD exec uvicorn main:app --host $HOST --port $PORT --workers 1 --timeout-keep-alive 75
