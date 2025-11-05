@@ -1,44 +1,43 @@
-# Base image
+# Base Python image
 FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV LOCAL=true
+# Environment variables
+ENV LOCAL=false
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV GIT_PYTHON_REFRESH=quiet
 
 # ---------------------------
-# Install system dependencies (without default nodejs)
+# Install system dependencies and Node.js 20 LTS
 # ---------------------------
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        git curl wget unzip zip build-essential python3-pip \
-        libpng-dev pkg-config libjpeg-dev libfreetype6-dev \
-        openjdk-21-jdk ca-certificates gnupg && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# ---------------------------
-# Install Node.js 20 LTS + npm
-# ---------------------------
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+        git curl wget unzip zip build-essential ca-certificates && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
-    npm install -g pnpm yarn
+    npm install -g pnpm yarn react-native-cli && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------
-# Install React Native CLI globally
+# (Optional) Install Google Cloud SDK if you want to deploy/run gcloud commands inside container
 # ---------------------------
-RUN npm install -g react-native-cli
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
+    | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
+    apt-get update -y && apt-get install -y google-cloud-sdk && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------
-# Python dependencies
+# Install Python dependencies
 # ---------------------------
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ---------------------------
-# Copy app code
+# Copy app source
 # ---------------------------
 COPY . .
 
@@ -46,4 +45,4 @@ COPY . .
 EXPOSE 8080
 
 # Start FastAPI app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--timeout-keep-alive", "75"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

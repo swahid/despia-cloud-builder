@@ -1,3 +1,2 @@
-gcloud container images delete gcr.io/despia-cloud/despia-cloud-builder:latest --force-delete-tags --quiet
 gcloud builds submit api/ --tag gcr.io/despia-cloud/despia-cloud-builder:latest
 gcloud run deploy despia-cloud-builder --image gcr.io/despia-cloud/despia-cloud-builder:latest --platform managed --region us-central1 --allow-unauthenticated --memory 2Gi --cpu 2
