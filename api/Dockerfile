@@ -3,6 +3,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV LOCAL=true
+
 # Install git, curl, npm and clean up apt cache
 RUN apt-get update && \
     apt-get install -y git curl && \
