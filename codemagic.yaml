@@ -3,115 +3,97 @@ workflows:
     name: Despia Cloud Web App Builder
     instance_type: mac_mini_m2
     max_build_duration: 30
-    labels:
-      - ${CLIENT_ID}
+    cache:
+      cache_paths:
+        - $CM_BUILD_DIR/node_modules
     environment:
+      groups:
+        - webapp_secrets
       vars:
-        CLIENT_ID: ${CLIENT_ID}
-        CLIENT_ASSEST_URL: $CLIENT_ASSEST_URL
+        CLIENT_ID: $CLIENT_ID
+        CLIENT_ASSET_URL: $CLIENT_ASSET_URL
         CALLBACK_URL: $CALLBACK_URL
-      # Use the latest Node.js version for the macOS environment
-      node: latest 
+      node: latest
+      npm: latest
 
     scripts:
-      - name: Setup Utilities and Persist Callback Functions
+      - name: Install Dependencies
         script: |
           #!/bin/bash
-          
-          # Install jq for robust JSON payload generation using Homebrew
-          echo "Installing jq via brew..."
+          # Install build dependencies
           brew install jq
-
-          # Update npm and install latest yarn globally
-          echo "Updating npm and yarn to latest global versions..."
-          npm install -g npm@latest
-          npm install -g yarn@latest
-
-          # --- Define and export shell functions for persistence across script steps ---
-
-          # Write function definitions to a temporary file
-          cat << 'EOF' > /tmp/callback_functions.sh
-            #!/bin/bash
-            export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
-
-            send_callback() {
-              local status=$1
-              local message=$2
-              local output_url=${3:-} 
-              
-              echo "Sending $status callback to $CALLBACK_URL with URL: $output_url"
-              
-              # Use jq to safely construct the JSON payload
-              JSON_PAYLOAD=$(jq -n \
-                --arg bid "$CM_BUILD_ID" \
-                --arg cid "$CLIENT_ID" \
-                --arg url "$output_url" \
-                --arg stat "$status" \
-                --arg msg "$message" \
-                '{
-                  "build_id": $bid,
-                  "client_id": $cid,
-                  "output_url": $url,
-                  "status": $stat,
-                  "message": $msg
-                }')
-
-              # Attempt to send callback with exponential backoff
-              MAX_RETRIES=5
-              DELAY=2
-              for i in $(seq 1 $MAX_RETRIES); do
-                echo "Attempt $i: Sending callback."
-                # -s for silent, -f for fail on HTTP errors
-                curl -fs -H "Content-Type: application/json" --data "$JSON_PAYLOAD" "$CALLBACK_URL" && return 0
-                echo "Callback failed. Retrying in $DELAY seconds..."
-                sleep $DELAY
-                DELAY=$((DELAY * 2))
-              done
-              echo "ERROR: Failed to send final callback after $MAX_RETRIES attempts."
-              return 1
-            }
-            export -f send_callback
-
-            send_failure_callback() {
-              send_callback "failed" "$1" ""
-              exit 1 
-            }
-            export -f send_failure_callback
-EOF
+          npm install -g npm@latest yarn@latest
+          
+          # Create callback utilities
+          cat > /tmp/callback_functions.sh << 'CALLBACK_EOF'
+          #!/bin/bash
+          export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
+          
+          send_callback() {
+            local status=$1
+            local message=$2
+            local output_url=${3:-}
+            
+            echo "Sending $status callback to $CALLBACK_URL"
+            JSON_PAYLOAD=$(jq -n \
+              --arg bid "$CM_BUILD_ID" \
+              --arg cid "$CLIENT_ID" \
+              --arg url "$output_url" \
+              --arg stat "$status" \
+              --arg msg "$message" \
+              '{build_id: $bid, client_id: $cid, output_url: $url, status: $stat, message: $msg}')
+            
+            MAX_RETRIES=5
+            DELAY=2
+            for i in $(seq 1 $MAX_RETRIES); do
+              echo "Attempt $i: Sending callback"
+              curl -fs -H "Content-Type: application/json" --data "$JSON_PAYLOAD" "$CALLBACK_URL" && return 0
+              echo "Callback failed. Retrying in $DELAY seconds..."
+              sleep $DELAY
+              DELAY=$((DELAY * 2))
+            done
+            echo "ERROR: Failed to send callback after $MAX_RETRIES attempts"
+            return 1
+          }
+          
+          send_failure_callback() {
+            send_callback "failed" "$1" ""
+            exit 1
+          }
+          
+          export -f send_callback send_failure_callback
+          CALLBACK_EOF
+          
+          chmod +x /tmp/callback_functions.sh
+          EOF
           echo "Callback functions prepared and saved to /tmp/callback_functions.sh."
           
-      - name: 1. Fetch Source Code (Git or Zip)
+      - name: Fetch Source Code
         script: |
           #!/bin/bash
-          # Load previously defined functions
-          . /tmp/callback_functions.sh
+          source /tmp/callback_functions.sh || send_failure_callback "Failed to source callback functions"
           
-          # Check if the URL contains .git to assume it's a Git repository
-          if [[ "$CLIENT_ASSEST_URL" == *".git"* ]]; then
-            echo "Source URL detected as Git repository. Cloning..."
-            if ! git clone "$CLIENT_ASSEST_URL" source; then
-              send_failure_callback "Failed to clone Git repository from $CLIENT_ASSEST_URL."
-            fi
+          echo "Processing Build: $CM_BUILD_ID for Client: $CLIENT_ID"
+          WORKSPACE_DIR="/workspace"
+          mkdir -p "$WORKSPACE_DIR"
+          cd "$WORKSPACE_DIR"
+          
+          if [[ "$SOURCE_URL" =~ \.git$ ]]; then
+            send_callback "in_progress" "Cloning Git repository..."
+            git clone "$SOURCE_URL" . || send_failure_callback "Git clone failed"
             
-          # Check if the URL contains .zip to assume it's a compressed file
-          elif [[ "$CLIENT_ASSEST_URL" == *".zip"* ]]; then
-            echo "Source URL detected as Zip file. Downloading and extracting..."
-            
-            # Use curl for downloading on macOS instances.
-            if ! curl -L -o source.zip "$CLIENT_ASSEST_URL"; then
-              send_failure_callback "Failed to download zip file from $CLIENT_ASSEST_URL."
+            if [ -n "$SOURCE_BRANCH" ]; then
+              git checkout "$SOURCE_BRANCH" || send_failure_callback "Branch checkout failed: $SOURCE_BRANCH"
             fi
-            
-            mkdir -p source
-            if ! unzip -q source.zip -d source; then
-              send_failure_callback "Failed to extract zip file."
-            fi
-
           else
-            send_failure_callback "Source URL $CLIENT_ASSEST_URL is neither a Git repository nor a Zip file."
+            send_callback "in_progress" "Downloading source ZIP..."
+            curl -L "$SOURCE_URL" -o source.zip || send_failure_callback "ZIP download failed"
+            unzip source.zip || send_failure_callback "ZIP extraction failed"
+            rm source.zip
           fi
           
-          echo "Source code fetched successfully."
+          [ -z "$(ls -A $WORKSPACE_DIR)" ] && send_failure_callback "Empty workspace after fetch"
+          send_callback "in_progress" "Source code fetched"
 
       - name: 2. Detect Framework and Build Web Project
         script: |
@@ -132,11 +114,6 @@ EOF
 
           if [ ! -f package.json ]; then
             send_failure_callback "Could not find package.json in the source code root. Cannot determine framework."
-          fi
-          
-          echo "Installing Node dependencies..."
-          if ! npm install; then
-            send_failure_callback "npm install failed. Check project dependencies."
           fi
 
           PACKAGE_CONTENT=$(cat package.json)
