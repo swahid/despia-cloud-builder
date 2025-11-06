@@ -224,20 +224,31 @@ workflows:
 
     publishing:
       scripts:
-        - name: Send Success Callback
+        - name: Make Artifact Public and Send Callback
           script: |
             #!/bin/bash
             . /tmp/callback_functions.sh
             
-            # Define the artifact URL for the ZIP file
+            # Define the artifact name
             OUTPUT_ZIP_NAME="web-app-dist.zip"
-            ARTIFACT_DOWNLOAD_URL="$CM_ARTIFACT_URL/$OUTPUT_ZIP_NAME"
+            
+            # Get public URL for the artifact using Codemagic API
+            echo "Getting public URL for artifact..."
+            PUBLIC_URL=$(curl -s -H "Content-Type: application/json" \
+              -H "x-auth-token: $CM_API_KEY" \
+              "https://api.codemagic.io/builds/$CM_BUILD_ID/artifacts/$OUTPUT_ZIP_NAME/public-url" | \
+              jq -r '.url')
+
+            if [ -z "$PUBLIC_URL" ] || [ "$PUBLIC_URL" = "null" ]; then
+              echo "Failed to get public URL. Falling back to private URL..."
+              PUBLIC_URL="$CM_ARTIFACT_URL/$OUTPUT_ZIP_NAME"
+            fi
             
             echo "Sending success callback..."
             echo "Build ID: $CM_BUILD_ID"
             echo "Client ID: $CLIENT_ID"
-            echo "Artifact URL: $ARTIFACT_DOWNLOAD_URL"
+            echo "Public Artifact URL: $PUBLIC_URL"
             
-            # Send the final success callback
-            send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$ARTIFACT_DOWNLOAD_URL"
+            # Send the final success callback with the public URL
+            send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$PUBLIC_URL"
             echo "Final callback sent. Build process complete."
