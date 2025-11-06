@@ -244,7 +244,9 @@ workflows:
             BUILD_API_URL="https://api.codemagic.io/builds/$CM_BUILD_ID"
             BUILD_JSON=$(curl -s -H "x-auth-token: $CM_API_KEY" "$BUILD_API_URL")
 
-            ARTIFACT_API_URL=$(echo "$BUILD_JSON" | jq -r ".artefacts[] | select(.name == \"$OUTPUT_ZIP_NAME\") | .url")
+            echo "$BUILD_JSON" 
+            echo "Locating artifact API URL for $OUTPUT_ZIP_NAME..."
+            ARTIFACT_API_URL=$(echo "$BUILD_JSON" | jq -r ".artifacts[] | select(.name == \"$OUTPUT_ZIP_NAME\") | .url")
 
             if [ -z "$ARTIFACT_API_URL" ] || [ "$ARTIFACT_API_URL" = "null" ]; then
               echo "ERROR: Could not find artifact API URL for $OUTPUT_ZIP_NAME"
