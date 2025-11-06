@@ -1,7 +1,7 @@
 workflows:
-  ios-app:
-    name: iOS Web App
-    instance_type: linux_x2
+  despia-app-builder:
+    name: Despia Cloud Web App Builder
+    instance_type: mac_mini_m2
     max_build_duration: 30
     labels:
       - ${CLIENT_ID}
