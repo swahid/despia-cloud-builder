@@ -24,30 +24,33 @@ workflows:
           brew install jq
           npm install -g npm@latest yarn@latest
           
-          # Create callback utilities
-          cat > /tmp/callback_functions.sh << 'CALLBACK_EOF'
+          # Create callback utilities (write to a file under the build dir)
+          cat > /tmp/callback_functions.sh <<'CALLBACK_EOF'
           #!/bin/bash
           export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
-          
+
           send_callback() {
-            local status=$1
-            local message=$2
-            local output_url=${3:-}
-            
+            local status="$1"
+            local message="$2"
+            local output_url="${3:-}"
+
             echo "Sending $status callback to $CALLBACK_URL"
-            JSON_PAYLOAD=$(jq -n \
+
+            # Build compact JSON safely with jq and stream it to curl to avoid argument parsing issues
+            JSON_PAYLOAD=$(jq -c -n \
               --arg bid "$CM_BUILD_ID" \
               --arg cid "$CLIENT_ID" \
               --arg url "$output_url" \
               --arg stat "$status" \
               --arg msg "$message" \
               '{build_id: $bid, client_id: $cid, output_url: $url, status: $stat, message: $msg}')
-            
+
             MAX_RETRIES=5
             DELAY=2
             for i in $(seq 1 $MAX_RETRIES); do
               echo "Attempt $i: Sending callback"
-              curl -fs -H "Content-Type: application/json" --data "$JSON_PAYLOAD" "$CALLBACK_URL" && return 0
+              # Pipe JSON into curl to avoid curl interpreting leading characters as options
+              printf '%s' "$JSON_PAYLOAD" | curl -fs -H "Content-Type: application/json" --data-binary @- "$CALLBACK_URL" && return 0
               echo "Callback failed. Retrying in $DELAY seconds..."
               sleep $DELAY
               DELAY=$((DELAY * 2))
@@ -55,72 +58,79 @@ workflows:
             echo "ERROR: Failed to send callback after $MAX_RETRIES attempts"
             return 1
           }
-          
+
           send_failure_callback() {
             send_callback "failed" "$1" ""
             exit 1
           }
-          
+
           export -f send_callback send_failure_callback
           CALLBACK_EOF
-          
+
           chmod +x /tmp/callback_functions.sh
-          EOF
           echo "Callback functions prepared and saved to /tmp/callback_functions.sh."
           
       - name: Fetch Source Code
         script: |
           #!/bin/bash
           source /tmp/callback_functions.sh || send_failure_callback "Failed to source callback functions"
-          
+
           echo "Processing Build: $CM_BUILD_ID for Client: $CLIENT_ID"
-          WORKSPACE_DIR="/workspace"
+          # Use Codemagic provided build dir (create a subfolder 'source')
+          WORKSPACE_DIR="${CM_BUILD_DIR:-/tmp}/source"
           mkdir -p "$WORKSPACE_DIR"
-          cd "$WORKSPACE_DIR"
-          
+          cd "$WORKSPACE_DIR" || send_failure_callback "Failed to enter workspace dir: $WORKSPACE_DIR"
+
           if [[ "$SOURCE_URL" =~ \.git$ ]]; then
             send_callback "in_progress" "Cloning Git repository..."
             git clone "$SOURCE_URL" . || send_failure_callback "Git clone failed"
-            
+
             if [ -n "$SOURCE_BRANCH" ]; then
               git checkout "$SOURCE_BRANCH" || send_failure_callback "Branch checkout failed: $SOURCE_BRANCH"
             fi
           else
             send_callback "in_progress" "Downloading source ZIP..."
-            curl -L "$SOURCE_URL" -o source.zip || send_failure_callback "ZIP download failed"
-            unzip source.zip || send_failure_callback "ZIP extraction failed"
-            rm source.zip
+            curl -fsSL "$SOURCE_URL" -o source.zip || send_failure_callback "ZIP download failed"
+            unzip -q source.zip || send_failure_callback "ZIP extraction failed"
+            rm -f source.zip
           fi
-          
-          [ -z "$(ls -A $WORKSPACE_DIR)" ] && send_failure_callback "Empty workspace after fetch"
+
+          [ -z "$(ls -A .)" ] && send_failure_callback "Empty workspace after fetch"
           send_callback "in_progress" "Source code fetched"
 
-      - name: 2. Detect Framework and Build Web Project
+      - name: Build Web Project
         script: |
           #!/bin/bash
           # Load previously defined functions
           . /tmp/callback_functions.sh
 
-          # Ensure we are in the source directory
-          cd source || send_failure_callback "Failed to navigate into source directory."
-          
-          # Handle common case where zip/clone results in a single sub-directory (flatten structure)
+          # Work inside the same source directory used by the fetch step
+          SOURCE_DIR="${CM_BUILD_DIR:-/tmp}/source"
+          cd "$SOURCE_DIR" || send_failure_callback "Failed to navigate into source directory: $SOURCE_DIR"
+
+          # If the fetch produced a single top-level directory, flatten it
           if [[ $(find . -maxdepth 1 -mindepth 1 -type d | wc -l) -eq 1 ]]; then
-              DIR_TO_MOVE=$(find . -maxdepth 1 -mindepth 1 -type d)
-              echo "Detected single top-level directory ($DIR_TO_MOVE), flattening structure."
-              mv "$DIR_TO_MOVE"/* .
-              rmdir "$DIR_TO_MOVE"
+            DIR_TO_MOVE=$(find . -maxdepth 1 -mindepth 1 -type d -print -quit)
+            echo "Detected single top-level directory ($DIR_TO_MOVE), flattening structure."
+            mv "$DIR_TO_MOVE"/* .
+            rmdir "$DIR_TO_MOVE" || true
           fi
 
           if [ ! -f package.json ]; then
             send_failure_callback "Could not find package.json in the source code root. Cannot determine framework."
           fi
 
+          echo "Installing Node dependencies..."
+          if [ -f "yarn.lock" ]; then
+            yarn install || send_failure_callback "yarn install failed"
+          else
+            npm install || send_failure_callback "npm install failed"
+          fi
+
           PACKAGE_CONTENT=$(cat package.json)
           FRAMEWORK=""
           DIST_FOLDER=""
 
-          # Logic to detect common web frameworks
           if echo "$PACKAGE_CONTENT" | grep -q '"next"'; then
             FRAMEWORK="Next.js"
             DIST_FOLDER=".next"
@@ -139,87 +149,60 @@ workflows:
 
           echo "Detected Framework: $FRAMEWORK."
 
-          # --- ENHANCED BUILD LOGIC WITH FALLBACK ---
           BUILD_SUCCESS=0
-          
-          # 1. Attempt standard 'npm run build' first
           echo "Attempting standard build: npm run build"
           if npm run build; then
             echo "Standard 'npm run build' successful."
             BUILD_SUCCESS=1
           else
-            echo "Standard 'npm run build' failed (Missing script or execution error). Trying framework-specific fallback..."
-            
-            # 2. Try framework-specific fallback commands using npx
+            echo "Standard 'npm run build' failed. Trying framework-specific fallback..."
             case "$FRAMEWORK" in
               "Next.js")
-                echo "Trying 'npx next build'..."
-                if npx next build; then BUILD_SUCCESS=1; fi
+                npx next build && BUILD_SUCCESS=1 || true
                 ;;
               "CRA-React")
-                echo "Trying 'npx react-scripts build'..."
-                if npx react-scripts build; then BUILD_SUCCESS=1; fi
+                npx react-scripts build && BUILD_SUCCESS=1 || true
                 ;;
               "Vite-React"|"Vue.js")
-                echo "Trying 'npx vite build'..."
-                if npx vite build; then BUILD_SUCCESS=1; fi
+                npx vite build && BUILD_SUCCESS=1 || true
                 ;;
               *)
-                echo "No framework-specific fallback available."
                 ;;
             esac
           fi
-          
-          # Check if the build ultimately failed
-          if [ $BUILD_SUCCESS -eq 0 ]; then
-            send_failure_callback "Build failed for $FRAMEWORK project. The 'build' script is missing and framework-specific fallbacks also failed."
-          fi
-          # --- END ENHANCED BUILD LOGIC ---
 
-          
-          # Check for the distribution folder existence
-          if [ ! -d $DIST_FOLDER ]; then
+          if [ $BUILD_SUCCESS -eq 0 ]; then
+            send_failure_callback "Build failed for $FRAMEWORK project."
+          fi
+
+          # Verify distribution folder
+          if [ ! -d "$DIST_FOLDER" ]; then
             send_failure_callback "Build succeeded, but the expected distribution folder ($DIST_FOLDER) was not found."
           fi
-          
-          # Save the detected folder name to a temporary file for the publishing step
-          echo $DIST_FOLDER > /tmp/dist_folder_name.txt 
-          
-          echo "Web project built successfully. Distribution folder: $DIST_FOLDER"
 
+          # Persist the detected folder name
+          echo "$DIST_FOLDER" > /tmp/dist_folder_name.txt
+          echo "Web project built successfully. Distribution folder: $DIST_FOLDER"
 
     # Artifacts section: Tells Codemagic what file to upload and make available
     artifacts:
       - web-app-dist.zip
-    
+
     publishing:
       scripts:
-        - name: 3. Zip Artifact and Final Success Callback
+        - name: Zip Artifact and Final Success Callback
           script: |
             #!/bin/bash
-            # Load previously defined functions
             . /tmp/callback_functions.sh
-
-            # Ensure we are in the source directory to access the distribution folder
-            cd source || send_failure_callback "Failed to navigate into source directory for zipping."
-            
-            # Load the detected distribution folder name from /tmp
+            SOURCE_DIR="${CM_BUILD_DIR:-/tmp}/source"
+            cd "$SOURCE_DIR" || send_failure_callback "Failed to navigate into source directory for zipping."
             DIST_FOLDER=$(cat /tmp/dist_folder_name.txt)
             OUTPUT_ZIP_NAME="web-app-dist.zip"
-            
             echo "Zipping the distribution folder ($DIST_FOLDER) into $OUTPUT_ZIP_NAME..."
-            
-            # Zip the contents of the distribution folder. 
-            # We move the zip file one directory up (to the root of the build) 
-            # so Codemagic finds it easily based on the 'artifacts' setting.
-            if ! zip -r "../$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
+            if ! zip -r "$CM_BUILD_DIR/$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
               echo "ERROR: Failed to zip the distribution folder $DIST_FOLDER."
               exit 1
             fi
-            
             echo "Artifact successfully created: $OUTPUT_ZIP_NAME"
-            
-            # Send the final success callback.
-            send_callback "success" "Build completed, artifact successfully published." "$CM_ARTIFACT_URL"
-            
+            send_callback "success" "Build completed, artifact successfully published." "$CM_ARTIFACT_URL/$OUTPUT_ZIP_NAME"
             echo "Final callback finished."
