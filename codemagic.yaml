@@ -81,18 +81,23 @@ workflows:
           mkdir -p "$WORKSPACE_DIR"
           cd "$WORKSPACE_DIR" || send_failure_callback "Failed to enter workspace dir: $WORKSPACE_DIR"
 
-          if [[ "$SOURCE_URL" =~ \.git$ ]]; then
-            send_callback "in_progress" "Cloning Git repository..."
-            git clone "$SOURCE_URL" . || send_failure_callback "Git clone failed"
+          # Simple asset URL handling: expect CLIENT_ASSET_URL to end with .git or .zip
+          if [[ "$CLIENT_ASSET_URL" =~ \.git$ ]]; then
+            send_callback "in_progress" "Cloning Git repository from CLIENT_ASSET_URL..."
+            git clone "$CLIENT_ASSET_URL" . || send_failure_callback "Git clone failed for $CLIENT_ASSET_URL"
 
             if [ -n "$SOURCE_BRANCH" ]; then
               git checkout "$SOURCE_BRANCH" || send_failure_callback "Branch checkout failed: $SOURCE_BRANCH"
             fi
-          else
-            send_callback "in_progress" "Downloading source ZIP..."
-            curl -fsSL "$SOURCE_URL" -o source.zip || send_failure_callback "ZIP download failed"
+
+          elif [[ "$CLIENT_ASSET_URL" =~ \.zip$ ]]; then
+            send_callback "in_progress" "Downloading ZIP from CLIENT_ASSET_URL..."
+            wget -q -O source.zip "$CLIENT_ASSET_URL" || send_failure_callback "ZIP download failed for $CLIENT_ASSET_URL"
             unzip -q source.zip || send_failure_callback "ZIP extraction failed"
             rm -f source.zip
+
+          else
+            send_failure_callback "CLIENT_ASSET_URL is not a .git or .zip URL: $CLIENT_ASSET_URL"
           fi
 
           [ -z "$(ls -A .)" ] && send_failure_callback "Empty workspace after fetch"
