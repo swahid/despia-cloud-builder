@@ -228,30 +228,49 @@ workflows:
           script: |
             #!/bin/bash
             . /tmp/callback_functions.sh
-            
-            # Define the artifact name and calculate expiration (6 hours from now)
+
             OUTPUT_ZIP_NAME="web-app-dist.zip"
-            EXPIRY_TIMESTAMP=$(date -v+6H +%s)  # Mac OS X syntax for date
-            
-            # Get public URL for the artifact using Codemagic API
-            echo "Getting public URL for artifact..."
+            # Calculate expiry timestamp (6 hours from now, portable for Linux/macOS)
+            if date --version >/dev/null 2>&1; then
+              # GNU date (Linux)
+              EXPIRY_TIMESTAMP=$(date -d "+6 hours" +%s)
+            else
+              # BSD date (macOS)
+              EXPIRY_TIMESTAMP=$(date -v+6H +%s)
+            fi
+
+            # 1. Get build details to find artifact API URL
+            echo "Fetching build details to locate artifact API URL..."
+            BUILD_API_URL="https://api.codemagic.io/builds/$CM_BUILD_ID"
+            BUILD_JSON=$(curl -s -H "x-auth-token: $CM_API_KEY" "$BUILD_API_URL")
+
+            ARTIFACT_API_URL=$(echo "$BUILD_JSON" | jq -r ".artefacts[] | select(.name == \"$OUTPUT_ZIP_NAME\") | .url")
+
+            if [ -z "$ARTIFACT_API_URL" ] || [ "$ARTIFACT_API_URL" = "null" ]; then
+              echo "ERROR: Could not find artifact API URL for $OUTPUT_ZIP_NAME"
+              send_failure_callback "Could not find artifact API URL for $OUTPUT_ZIP_NAME"
+            fi
+
+            # 2. Request public URL for the artifact
+            echo "Requesting public URL for artifact..."
+            # Request public URL for the artifact (valid for 6 hours)
             PUBLIC_URL=$(curl -s -X POST \
               -H "Content-Type: application/json" \
               -H "x-auth-token: $CM_API_KEY" \
               -d "{\"expiresAt\": $EXPIRY_TIMESTAMP}" \
-              "https://api.codemagic.io/artifacts/$CM_APP_ID/$CM_BUILD_ID/$OUTPUT_ZIP_NAME/public-url" | \
-              jq -r '.url')
+              "$ARTIFACT_API_URL/public-url" | jq -r '.url')
 
+            # If public URL is missing, fallback to private artifact API URL
             if [ -z "$PUBLIC_URL" ] || [ "$PUBLIC_URL" = "null" ]; then
               echo "Failed to get public URL. Falling back to private URL..."
-              PUBLIC_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts/$OUTPUT_ZIP_NAME"
+              PUBLIC_URL="$ARTIFACT_API_URL"
             fi
-            
+
             echo "Sending success callback..."
             echo "Build ID: $CM_BUILD_ID"
             echo "Client ID: $CLIENT_ID"
             echo "Public Artifact URL: $PUBLIC_URL"
-            
-            # Send the final success callback with the public URL
+
+            # Send the final success callback with the public artifact URL
             send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$PUBLIC_URL"
             echo "Final callback sent. Build process complete."
