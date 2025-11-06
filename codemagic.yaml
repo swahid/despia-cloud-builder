@@ -10,27 +10,31 @@ workflows:
         CLIENT_ID: ${CLIENT_ID}
         CLIENT_ASSEST_URL: $CLIENT_ASSEST_URL
         CALLBACK_URL: $CALLBACK_URL
-      # Add Node.js support required for building web projects
-      node: 18.x 
+      # Use the latest Node.js version for the macOS environment
+      node: latest 
 
     scripts:
       - name: Setup Utilities and Callback Functions
         script: |
           #!/bin/bash
           
-          # Install jq for robust JSON payload generation
-          sudo apt-get update
-          sudo apt-get install -y jq
+          # Install jq for robust JSON payload generation using Homebrew
+          echo "Installing jq via brew..."
+          brew install jq
 
-          # Define the artifact URL environment variable for use in callbacks
-          # This URL directs to the artifacts page in Codemagic where the zip can be downloaded
+          # Update npm and install latest yarn globally
+          echo "Updating npm and yarn to latest global versions..."
+          npm install -g npm@latest
+          npm install -g yarn@latest
+          
+          # Define the artifact URL environment variable
           export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
           
           # Define the generic callback function (exported for use in other scripts)
           send_callback() {
             local status=$1
             local message=$2
-            local output_url=${3:-} # Defaults to empty string if not provided
+            local output_url=${3:-} 
             
             echo "Sending $status callback to $CALLBACK_URL with URL: $output_url"
             
@@ -65,10 +69,10 @@ workflows:
           }
           export -f send_callback
 
-          # Define failure handler (exported for use in other scripts)
+          # Define failure handler 
           send_failure_callback() {
             send_callback "failed" "$1" ""
-            exit 1 # Crucial: Stop the workflow immediately on failure
+            exit 1 
           }
           export -f send_failure_callback
 
@@ -87,7 +91,8 @@ workflows:
           elif [[ "$CLIENT_ASSEST_URL" == *".zip"* ]]; then
             echo "Source URL detected as Zip file. Downloading and extracting..."
             
-            if ! wget -O source.zip "$CLIENT_ASSEST_URL"; then
+            # Use curl for downloading on macOS instances.
+            if ! curl -L -o source.zip "$CLIENT_ASSEST_URL"; then
               send_failure_callback "Failed to download zip file from $CLIENT_ASSEST_URL."
             fi
             
@@ -100,7 +105,7 @@ workflows:
             send_failure_callback "Source URL $CLIENT_ASSEST_URL is neither a Git repository nor a Zip file."
           fi
           
-          # Move into the source directory for subsequent steps
+          # Move into the source directory 
           cd source || send_failure_callback "Failed to navigate into source directory."
           
           # Handle common case where zip/clone results in a single sub-directory (flatten structure)
@@ -182,8 +187,6 @@ workflows:
             echo "Zipping the distribution folder ($DIST_FOLDER) into $OUTPUT_ZIP_NAME..."
             
             # Zip the contents of the distribution folder. 
-            # We move the zip file one directory up (to the root of the build) 
-            # so Codemagic finds it easily based on the 'artifacts' setting.
             if ! zip -r "../$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
               echo "ERROR: Failed to zip the distribution folder $DIST_FOLDER."
               exit 1
@@ -191,7 +194,7 @@ workflows:
             
             echo "Artifact successfully created: $OUTPUT_ZIP_NAME"
             
-            # Send the final success callback. This script only runs on successful build.
+            # Send the final success callback.
             send_callback "success" "Build completed, artifact successfully published." "$CM_ARTIFACT_URL"
             
             echo "Final callback finished."

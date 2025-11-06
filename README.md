@@ -1,6 +1,6 @@
 Automated Web App Build and Artifact Generation Workflow
 
-This document serves as the comprehensive guide for the automated Codemagic workflow (ios-app), detailing its inputs, execution steps, status reporting mechanism, and the complete YAML configuration.
+This document serves as the comprehensive guide for the automated Codemagic workflow (despia-app-builder), detailing its inputs, execution steps, status reporting mechanism, and the complete YAML configuration.
 
 1. Inputs (Environment Variables)
 
@@ -79,6 +79,7 @@ The shell script constructs and sends the status update using the following curl
 curl -fs -H "Content-Type: application/json" --data '{...JSON Payload...}' "$CALLBACK_URL"
 
 
+
 A. Success Payload (End of Build)
 
 Sent only when the artifact is successfully zipped and published.
@@ -128,6 +129,7 @@ Example Success Response (JSON Body):
   "status": "success",
   "message": "Build completed, artifact successfully published."
 }
+
 
 
 B. Failure Payload (Immediate Exit)
@@ -181,14 +183,15 @@ Example Failure Response (JSON Body):
 }
 
 
+
 4. Codemagic Configuration (codemagic.yaml)
 
-Below is the complete, up-to-date YAML configuration for the CI/CD workflow:
+Below is the complete, up-to-date YAML configuration for the CI/CD workflow, now running on a mac_mini_m2 instance and leveraging latest Node/npm/Yarn versions:
 
 workflows:
-  ios-app:
-    name: iOS Web App
-    instance_type: linux_x2
+  despia-app-builder:
+    name: Despia Cloud Web App Builder
+    instance_type: mac_mini_m2
     max_build_duration: 30
     labels:
       - ${CLIENT_ID}
@@ -197,18 +200,23 @@ workflows:
         CLIENT_ID: ${CLIENT_ID}
         CLIENT_ASSEST_URL: $CLIENT_ASSEST_URL
         CALLBACK_URL: $CALLBACK_URL
-      # Add Node.js support required for building web projects
-      node: 18.x 
+      # Use the latest Node.js version as requested for the macOS environment
+      node: latest 
 
     scripts:
       - name: Setup Utilities and Callback Functions
         script: |
           #!/bin/bash
           
-          # Install jq for robust JSON payload generation
-          sudo apt-get update
-          sudo apt-get install -y jq
+          # Install jq for robust JSON payload generation using Homebrew (standard on macOS CI runners)
+          echo "Installing jq via brew..."
+          brew install jq
 
+          # Update npm and install latest yarn globally as requested
+          echo "Updating npm and yarn to latest global versions..."
+          npm install -g npm@latest
+          npm install -g yarn@latest
+          
           # Define the artifact URL environment variable for use in callbacks
           # This URL directs to the artifacts page in Codemagic where the zip can be downloaded
           export CM_ARTIFACT_URL="[https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts](https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts)"
@@ -274,11 +282,13 @@ workflows:
           elif [[ "$CLIENT_ASSEST_URL" == *".zip"* ]]; then
             echo "Source URL detected as Zip file. Downloading and extracting..."
             
-            if ! wget -O source.zip "$CLIENT_ASSEST_URL"; then
+            # Use curl instead of wget for reliable downloading on macOS instances.
+            if ! curl -L -o source.zip "$CLIENT_ASSEST_URL"; then
               send_failure_callback "Failed to download zip file from $CLIENT_ASSEST_URL."
             fi
             
             mkdir -p source
+            # unzip is typically pre-installed on macOS
             if ! unzip -q source.zip -d source; then
               send_failure_callback "Failed to extract zip file."
             fi
