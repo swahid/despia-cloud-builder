@@ -186,6 +186,33 @@ workflows:
           # Persist the detected folder name
           echo "$DIST_FOLDER" > /tmp/dist_folder_name.txt
           echo "Web project built successfully. Distribution folder: $DIST_FOLDER"
+      - name: Create Distribution ZIP
+        script: |
+          #!/bin/bash
+          . /tmp/callback_functions.sh
+          SOURCE_DIR="${CM_BUILD_DIR:-/tmp}/source"
+          cd "$SOURCE_DIR" || send_failure_callback "Failed to navigate into source directory for zipping."
+          
+          # Get the distribution folder name saved during build
+          DIST_FOLDER=$(cat /tmp/dist_folder_name.txt)
+          OUTPUT_ZIP_NAME="web-app-dist.zip"
+          
+          echo "Creating distribution archive..."
+          echo "Source directory: $SOURCE_DIR"
+          echo "Distribution folder: $DIST_FOLDER"
+          echo "Output ZIP: $OUTPUT_ZIP_NAME"
+          
+          # Ensure distribution folder exists
+          if [ ! -d "$DIST_FOLDER" ]; then
+            send_failure_callback "Distribution folder $DIST_FOLDER not found!"
+          fi
+          
+          # Create the ZIP archive
+          if ! zip -r "$CM_BUILD_DIR/$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
+            send_failure_callback "Failed to create ZIP archive from $DIST_FOLDER"
+          fi
+          
+          echo "Successfully created artifact: $OUTPUT_ZIP_NAME"
 
     cache:
       cache_paths:
@@ -197,19 +224,20 @@ workflows:
 
     publishing:
       scripts:
-        - name: Zip Artifact and Final Success Callback
+        - name: Send Success Callback
           script: |
             #!/bin/bash
             . /tmp/callback_functions.sh
-            SOURCE_DIR="${CM_BUILD_DIR:-/tmp}/source"
-            cd "$SOURCE_DIR" || send_failure_callback "Failed to navigate into source directory for zipping."
-            DIST_FOLDER=$(cat /tmp/dist_folder_name.txt)
+            
+            # Define the artifact URL for the ZIP file
             OUTPUT_ZIP_NAME="web-app-dist.zip"
-            echo "Zipping the distribution folder ($DIST_FOLDER) into $OUTPUT_ZIP_NAME..."
-            if ! zip -r "$CM_BUILD_DIR/$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
-              echo "ERROR: Failed to zip the distribution folder $DIST_FOLDER."
-              exit 1
-            fi
-            echo "Artifact successfully created: $OUTPUT_ZIP_NAME"
-            send_callback "success" "Build completed, artifact successfully published." "$CM_ARTIFACT_URL/$OUTPUT_ZIP_NAME"
-            echo "Final callback finished."
+            ARTIFACT_DOWNLOAD_URL="$CM_ARTIFACT_URL/$OUTPUT_ZIP_NAME"
+            
+            echo "Sending success callback..."
+            echo "Build ID: $CM_BUILD_ID"
+            echo "Client ID: $CLIENT_ID"
+            echo "Artifact URL: $ARTIFACT_DOWNLOAD_URL"
+            
+            # Send the final success callback
+            send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$ARTIFACT_DOWNLOAD_URL"
+            echo "Final callback sent. Build process complete."
