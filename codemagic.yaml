@@ -14,7 +14,7 @@ workflows:
       node: latest 
 
     scripts:
-      - name: Setup Utilities and Callback Functions
+      - name: Setup Utilities and Persist Callback Functions
         script: |
           #!/bin/bash
           
@@ -26,59 +26,65 @@ workflows:
           echo "Updating npm and yarn to latest global versions..."
           npm install -g npm@latest
           npm install -g yarn@latest
+
+          # --- Define and export shell functions for persistence across script steps ---
+
+          # Write function definitions to a temporary file
+          cat << 'EOF' > /tmp/callback_functions.sh
+            #!/bin/bash
+            export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
+
+            send_callback() {
+              local status=$1
+              local message=$2
+              local output_url=${3:-} 
+              
+              echo "Sending $status callback to $CALLBACK_URL with URL: $output_url"
+              
+              # Use jq to safely construct the JSON payload
+              JSON_PAYLOAD=$(jq -n \
+                --arg bid "$CM_BUILD_ID" \
+                --arg cid "$CLIENT_ID" \
+                --arg url "$output_url" \
+                --arg stat "$status" \
+                --arg msg "$message" \
+                '{
+                  "build_id": $bid,
+                  "client_id": $cid,
+                  "output_url": $url,
+                  "status": $stat,
+                  "message": $msg
+                }')
+
+              # Attempt to send callback with exponential backoff
+              MAX_RETRIES=5
+              DELAY=2
+              for i in $(seq 1 $MAX_RETRIES); do
+                echo "Attempt $i: Sending callback."
+                # -s for silent, -f for fail on HTTP errors
+                curl -fs -H "Content-Type: application/json" --data "$JSON_PAYLOAD" "$CALLBACK_URL" && return 0
+                echo "Callback failed. Retrying in $DELAY seconds..."
+                sleep $DELAY
+                DELAY=$((DELAY * 2))
+              done
+              echo "ERROR: Failed to send final callback after $MAX_RETRIES attempts."
+              return 1
+            }
+            export -f send_callback
+
+            send_failure_callback() {
+              send_callback "failed" "$1" ""
+              exit 1 
+            }
+            export -f send_failure_callback
+EOF
+          echo "Callback functions prepared and saved to /tmp/callback_functions.sh."
           
-          # Define the artifact URL environment variable
-          export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
-          
-          # Define the generic callback function (exported for use in other scripts)
-          send_callback() {
-            local status=$1
-            local message=$2
-            local output_url=${3:-} 
-            
-            echo "Sending $status callback to $CALLBACK_URL with URL: $output_url"
-            
-            # Use jq to safely construct the JSON payload
-            JSON_PAYLOAD=$(jq -n \
-              --arg bid "$CM_BUILD_ID" \
-              --arg cid "$CLIENT_ID" \
-              --arg url "$output_url" \
-              --arg stat "$status" \
-              --arg msg "$message" \
-              '{
-                "build_id": $bid,
-                "client_id": $cid,
-                "output_url": $url,
-                "status": $stat,
-                "message": $msg
-              }')
-
-            # Attempt to send callback with exponential backoff
-            MAX_RETRIES=5
-            DELAY=2
-            for i in $(seq 1 $MAX_RETRIES); do
-              echo "Attempt $i: Sending callback."
-              # -s for silent, -f for fail on HTTP errors
-              curl -fs -H "Content-Type: application/json" --data "$JSON_PAYLOAD" "$CALLBACK_URL" && return 0
-              echo "Callback failed. Retrying in $DELAY seconds..."
-              sleep $DELAY
-              DELAY=$((DELAY * 2))
-            done
-            echo "ERROR: Failed to send final callback after $MAX_RETRIES attempts."
-            return 1
-          }
-          export -f send_callback
-
-          # Define failure handler 
-          send_failure_callback() {
-            send_callback "failed" "$1" ""
-            exit 1 
-          }
-          export -f send_failure_callback
-
       - name: 1. Fetch Source Code (Git or Zip)
         script: |
           #!/bin/bash
+          # Load previously defined functions
+          . /tmp/callback_functions.sh
           
           # Check if the URL contains .git to assume it's a Git repository
           if [[ "$CLIENT_ASSEST_URL" == *".git"* ]]; then
@@ -105,7 +111,15 @@ workflows:
             send_failure_callback "Source URL $CLIENT_ASSEST_URL is neither a Git repository nor a Zip file."
           fi
           
-          # Move into the source directory 
+          echo "Source code fetched successfully."
+
+      - name: 2. Detect Framework and Build Web Project
+        script: |
+          #!/bin/bash
+          # Load previously defined functions
+          . /tmp/callback_functions.sh
+
+          # Ensure we are in the source directory
           cd source || send_failure_callback "Failed to navigate into source directory."
           
           # Handle common case where zip/clone results in a single sub-directory (flatten structure)
@@ -115,13 +129,7 @@ workflows:
               mv "$DIR_TO_MOVE"/* .
               rmdir "$DIR_TO_MOVE"
           fi
-          
-          echo "Source code fetched successfully."
 
-      - name: 2. Detect Framework and Build Web Project
-        script: |
-          #!/bin/bash
-          
           if [ ! -f package.json ]; then
             send_failure_callback "Could not find package.json in the source code root. Cannot determine framework."
           fi
@@ -152,12 +160,45 @@ workflows:
             send_failure_callback "Unsupported framework detected. Only Next.js, React, and Vue.js are supported."
           fi
 
-          echo "Detected Framework: $FRAMEWORK. Running build command: npm run build"
+          echo "Detected Framework: $FRAMEWORK."
+
+          # --- ENHANCED BUILD LOGIC WITH FALLBACK ---
+          BUILD_SUCCESS=0
           
-          # Run the build command
-          if ! npm run build; then
-            send_failure_callback "Build command failed for $FRAMEWORK project (npm run build)."
+          # 1. Attempt standard 'npm run build' first
+          echo "Attempting standard build: npm run build"
+          if npm run build; then
+            echo "Standard 'npm run build' successful."
+            BUILD_SUCCESS=1
+          else
+            echo "Standard 'npm run build' failed (Missing script or execution error). Trying framework-specific fallback..."
+            
+            # 2. Try framework-specific fallback commands using npx
+            case "$FRAMEWORK" in
+              "Next.js")
+                echo "Trying 'npx next build'..."
+                if npx next build; then BUILD_SUCCESS=1; fi
+                ;;
+              "CRA-React")
+                echo "Trying 'npx react-scripts build'..."
+                if npx react-scripts build; then BUILD_SUCCESS=1; fi
+                ;;
+              "Vite-React"|"Vue.js")
+                echo "Trying 'npx vite build'..."
+                if npx vite build; then BUILD_SUCCESS=1; fi
+                ;;
+              *)
+                echo "No framework-specific fallback available."
+                ;;
+            esac
           fi
+          
+          # Check if the build ultimately failed
+          if [ $BUILD_SUCCESS -eq 0 ]; then
+            send_failure_callback "Build failed for $FRAMEWORK project. The 'build' script is missing and framework-specific fallbacks also failed."
+          fi
+          # --- END ENHANCED BUILD LOGIC ---
+
           
           # Check for the distribution folder existence
           if [ ! -d $DIST_FOLDER ]; then
@@ -179,6 +220,11 @@ workflows:
         - name: 3. Zip Artifact and Final Success Callback
           script: |
             #!/bin/bash
+            # Load previously defined functions
+            . /tmp/callback_functions.sh
+
+            # Ensure we are in the source directory to access the distribution folder
+            cd source || send_failure_callback "Failed to navigate into source directory for zipping."
             
             # Load the detected distribution folder name from /tmp
             DIST_FOLDER=$(cat /tmp/dist_folder_name.txt)
@@ -187,6 +233,8 @@ workflows:
             echo "Zipping the distribution folder ($DIST_FOLDER) into $OUTPUT_ZIP_NAME..."
             
             # Zip the contents of the distribution folder. 
+            # We move the zip file one directory up (to the root of the build) 
+            # so Codemagic finds it easily based on the 'artifacts' setting.
             if ! zip -r "../$OUTPUT_ZIP_NAME" "$DIST_FOLDER"; then
               echo "ERROR: Failed to zip the distribution folder $DIST_FOLDER."
               exit 1
