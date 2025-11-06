@@ -25,7 +25,6 @@ workflows:
           # Create callback utilities (write to a file under the build dir)
           cat > /tmp/callback_functions.sh <<'CALLBACK_EOF'
           #!/bin/bash
-          export CM_ARTIFACT_URL="https://app.codemagic.io/app/$CM_APP_ID/build/$CM_BUILD_ID/artifacts"
 
           send_callback() {
             local status="$1"
@@ -43,7 +42,7 @@ workflows:
               --arg msg "$message" \
               '{build_id: $bid, client_id: $cid, output_url: $url, status: $stat, message: $msg}')
 
-            MAX_RETRIES=5
+            MAX_RETRIES=2
             DELAY=2
             for i in $(seq 1 $MAX_RETRIES); do
               echo "Attempt $i: Sending callback"
@@ -244,35 +243,18 @@ workflows:
             BUILD_API_URL="https://api.codemagic.io/builds/$CM_BUILD_ID"
             BUILD_JSON=$(curl -s -H "x-auth-token: $CM_API_KEY" "$BUILD_API_URL")
 
-            echo "$BUILD_JSON" 
-            echo "Locating artifact API URL for $OUTPUT_ZIP_NAME..."
-            ARTIFACT_API_URL=$(echo "$BUILD_JSON" | jq -r ".artifacts[] | select(.name == \"$OUTPUT_ZIP_NAME\") | .url")
+            ARTIFACT_URL=$(echo "$CM_ARTIFACT_LINKS" | jq -r ".[] | select(.name == \"$OUTPUT_ZIP_NAME\") | .url")
 
-            if [ -z "$ARTIFACT_API_URL" ] || [ "$ARTIFACT_API_URL" = "null" ]; then
-              echo "ERROR: Could not find artifact API URL for $OUTPUT_ZIP_NAME"
-              send_failure_callback "Could not find artifact API URL for $OUTPUT_ZIP_NAME"
-            fi
-
-            # 2. Request public URL for the artifact
-            echo "Requesting public URL for artifact..."
-            # Request public URL for the artifact (valid for 6 hours)
-            PUBLIC_URL=$(curl -s -X POST \
-              -H "Content-Type: application/json" \
-              -H "x-auth-token: $CM_API_KEY" \
-              -d "{\"expiresAt\": $EXPIRY_TIMESTAMP}" \
-              "$ARTIFACT_API_URL/public-url" | jq -r '.url')
-
-            # If public URL is missing, fallback to private artifact API URL
-            if [ -z "$PUBLIC_URL" ] || [ "$PUBLIC_URL" = "null" ]; then
-              echo "Failed to get public URL. Falling back to private URL..."
-              PUBLIC_URL="$ARTIFACT_API_URL"
+            if [ -z "$ARTIFACT_URL" ] || [ "$ARTIFACT_URL" = "null" ]; then
+              echo "ERROR: Could not find artifact URL for $OUTPUT_ZIP_NAME in CM_ARTIFACT_LINKS"
+              send_failure_callback "Could not find artifact URL for $OUTPUT_ZIP_NAME in CM_ARTIFACT_LINKS"
             fi
 
             echo "Sending success callback..."
             echo "Build ID: $CM_BUILD_ID"
             echo "Client ID: $CLIENT_ID"
-            echo "Public Artifact URL: $PUBLIC_URL"
+            echo "Artifact URL: $ARTIFACT_URL"
 
-            # Send the final success callback with the public artifact URL
-            send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$PUBLIC_URL"
+            # Send the final success callback with the artifact URL
+            send_callback "success" "Build completed successfully. Distribution ZIP created and published." "$ARTIFACT_URL"
             echo "Final callback sent. Build process complete."
